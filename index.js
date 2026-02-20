@@ -74,13 +74,17 @@ async function getEODData(slackUserEmail) {
       canceledAt: { null: true },
       completedAt: { null: true },
     },
-    orderBy: "priority",
-    first: 5,
+    first: 50,
   });
 
   const completedIssues = completedResult.nodes;
   const movedIssues = movedResult.nodes;
-  const upcomingIssues = upcomingResult.nodes;
+  // Sort by priority (0=none,1=urgent,2=high,3=normal,4=low) and take top 5
+  const upcomingIssues = upcomingResult.nodes.sort((a, b) => {
+    const pa = a.priority === 0 ? 99 : a.priority;
+    const pb = b.priority === 0 ? 99 : b.priority;
+    return pa - pb;
+  }).slice(0, 5);
 
   return { linearUser, completedIssues, movedIssues, upcomingIssues };
 }
