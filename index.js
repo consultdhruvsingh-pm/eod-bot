@@ -7,7 +7,6 @@ app.use(express.json());
 
 const LINEAR_API_KEY = process.env.LINEAR_API_KEY;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
-const LINEAR_TEAM_NAME = process.env.LINEAR_TEAM_NAME; // e.g. "Engineering"
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -37,7 +36,6 @@ function priorityEmoji(p) {
 async function getEODData(slackUserEmail) {
   const linear = new LinearClient({ apiKey: LINEAR_API_KEY });
 
-  // Find the Linear user matching this Slack user's email
   const linearUser = await getLinearUserByEmail(linear, slackUserEmail);
   if (!linearUser) {
     return { error: `No Linear account found for *${slackUserEmail}*. Make sure your Slack and Linear emails match.` };
@@ -45,8 +43,8 @@ async function getEODData(slackUserEmail) {
 
   const { start, end } = todayRange();
 
-  // Issues the user completed today (moved to a "completed" or "done" state)
-  const completedResult = await linear.issues({
+  // ── Done today: PR merged (QA state, completedAt set today) ──
+  const mergedResult = await linear.issues({
     filter: {
       assignee: { id: { eq: linearUser.id } },
       completedAt: { gte: start, lte: end },
@@ -54,19 +52,30 @@ async function getEODData(slackUserEmail) {
     first: 50,
   });
 
-  // Issues also updated/moved to in-progress today (state changed today, not completed)
-  const movedResult = await linear.issues({
+  // ── Done today: PR open (In Review state — work is done, awaiting merge) ──
+  const inReviewResult = await linear.issues({
+    filter: {
+      assignee: { id: { eq: linearUser.id } },
+      completedAt: { null: true },
+      canceledAt: { null: true },
+      state: { name: { eq: "In Review" } },
+    },
+    first: 50,
+  });
+
+  // ── Still in progress (coding not done yet) ──
+  const inProgressResult = await linear.issues({
     filter: {
       assignee: { id: { eq: linearUser.id } },
       updatedAt: { gte: start, lte: end },
       completedAt: { null: true },
       canceledAt: { null: true },
-      state: { type: { in: ["started", "inProgress"] } },
+      state: { name: { eq: "In Progress" } },
     },
     first: 50,
   });
 
-  // Top 5 upcoming todos by priority (not started / todo)
+  // ── Top upcoming tasks by priority ──
   const upcomingResult = await linear.issues({
     filter: {
       assignee: { id: { eq: linearUser.id } },
@@ -77,23 +86,29 @@ async function getEODData(slackUserEmail) {
     first: 50,
   });
 
-  const completedIssues = completedResult.nodes;
-  const movedIssues = movedResult.nodes;
-  // Sort by priority (0=none,1=urgent,2=high,3=normal,4=low) and take top 5
-  const upcomingIssues = upcomingResult.nodes.sort((a, b) => {
-    const pa = a.priority === 0 ? 99 : a.priority;
-    const pb = b.priority === 0 ? 99 : b.priority;
-    return pa - pb;
-  }).slice(0, 5);
+  const mergedIssues = mergedResult.nodes;
+  const inReviewIssues = inReviewResult.nodes;
+  const inProgressIssues = inProgressResult.nodes;
+  const upcomingIssues = upcomingResult.nodes
+    .sort((a, b) => {
+      const pa = a.priority === 0 ? 99 : a.priority;
+      const pb = b.priority === 0 ? 99 : b.priority;
+      return pa - pb;
+    })
+    .slice(0, 5);
 
-  return { linearUser, completedIssues, movedIssues, upcomingIssues };
+  return { linearUser, mergedIssues, inReviewIssues, inProgressIssues, upcomingIssues };
 }
 
 function buildSlackBlocks(data, requesterName) {
-  const { linearUser, completedIssues, movedIssues, upcomingIssues } = data;
+  const { linearUser, mergedIssues, inReviewIssues, inProgressIssues, upcomingIssues } = data;
+
   const today = new Date().toLocaleDateString("en-US", {
     weekday: "long", month: "long", day: "numeric",
   });
+
+  // Combine merged + in review into a single "Done Today" section
+  const doneIssues = [...mergedIssues, ...inReviewIssues];
 
   const blocks = [
     {
@@ -107,21 +122,22 @@ function buildSlackBlocks(data, requesterName) {
     { type: "divider" },
   ];
 
-  // ── Completed today ──
+  // ── Done today (merged + in review) ──
   blocks.push({
     type: "section",
-    text: { type: "mrkdwn", text: `*✅ Completed Today* (${completedIssues.length})` },
+    text: { type: "mrkdwn", text: `*✅ Done Today* (${doneIssues.length})` },
   });
 
-  if (completedIssues.length === 0) {
-    blocks.push({ type: "section", text: { type: "mrkdwn", text: "_Nothing completed today yet_" } });
+  if (doneIssues.length === 0) {
+    blocks.push({ type: "section", text: { type: "mrkdwn", text: "_No tickets completed today_" } });
   } else {
-    for (const issue of completedIssues) {
+    for (const issue of doneIssues) {
+      const tag = mergedIssues.includes(issue) ? " · _merged_" : " · _PR open_";
       blocks.push({
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `${priorityEmoji(issue.priority)} *<${issue.url}|${issue.identifier}>* ${issue.title}`,
+          text: `${priorityEmoji(issue.priority)} *<${issue.url}|${issue.identifier}>* ${issue.title}${tag}`,
         },
       });
     }
@@ -129,16 +145,16 @@ function buildSlackBlocks(data, requesterName) {
 
   blocks.push({ type: "divider" });
 
-  // ── In progress / moved today ──
+  // ── Still in progress ──
   blocks.push({
     type: "section",
-    text: { type: "mrkdwn", text: `*🔄 In Progress / Moved Today* (${movedIssues.length})` },
+    text: { type: "mrkdwn", text: `*🔄 In Progress* (${inProgressIssues.length})` },
   });
 
-  if (movedIssues.length === 0) {
-    blocks.push({ type: "section", text: { type: "mrkdwn", text: "_No tickets moved today_" } });
+  if (inProgressIssues.length === 0) {
+    blocks.push({ type: "section", text: { type: "mrkdwn", text: "_Nothing still in progress_" } });
   } else {
-    for (const issue of movedIssues) {
+    for (const issue of inProgressIssues) {
       blocks.push({
         type: "section",
         text: {
@@ -174,7 +190,7 @@ function buildSlackBlocks(data, requesterName) {
   blocks.push({ type: "divider" });
   blocks.push({
     type: "context",
-    elements: [{ type: "mrkdwn", text: "💡 Add any blockers, video updates, or context not in Linear as a reply to this message." }],
+    elements: [{ type: "mrkdwn", text: "💡 Reply to this message with your Loom + PR link, and any blockers not captured in Linear." }],
   });
 
   return blocks;
@@ -185,14 +201,12 @@ function buildSlackBlocks(data, requesterName) {
 app.post("/eod", async (req, res) => {
   const { user_name, user_id, response_url } = req.body;
 
-  // Respond immediately to Slack (must reply within 3 seconds)
   res.json({
     response_type: "ephemeral",
     text: "⏳ Generating your EOD report, one sec...",
   });
 
   try {
-    // Get the Slack user's email via Slack API
     const slackRes = await fetch(
       `https://slack.com/api/users.info?user=${user_id}`,
       { headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` } }
@@ -222,7 +236,6 @@ app.post("/eod", async (req, res) => {
 
     const blocks = buildSlackBlocks(data, displayName);
 
-    // Post publicly to the channel
     await postToResponseUrl(response_url, {
       response_type: "in_channel",
       blocks,
