@@ -12,9 +12,8 @@ const LINEAR_TEAM_NAME = process.env.LINEAR_TEAM_NAME; // e.g. "Engineering"
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function getLinearUserByEmail(linear, email) {
-  const organization = await linear.organization;
-  const members = await organization.members();
-  return members.nodes.find(
+  const users = await linear.users();
+  return users.nodes.find(
     (m) => m.email?.toLowerCase() === email.toLowerCase()
   );
 }
