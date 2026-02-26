@@ -54,20 +54,6 @@ async function getEODData(slackUserEmail) {
     first: 50,
   });
 
-  // ── Done today: Merged (PR merged, dev needs to test in prod) ──
-  // FIX: updatedAt filter ensures we only count issues that moved
-  //       to "Merged" TODAY, not old issues sitting in this state.
-  const mergedResult = await linear.issues({
-    filter: {
-      assignee: { id: { eq: linearUser.id } },
-      updatedAt: { gte: start, lte: end },
-      completedAt: { null: true },
-      canceledAt: { null: true },
-      state: { name: { eq: "Merged" } },
-    },
-    first: 50,
-  });
-
   // ── Done today: In Review (PR opened, awaiting merge) ──
   // FIX: Added updatedAt filter so we only pick up issues that moved
   //       to "In Review" TODAY, not all historical In Review issues.
@@ -106,15 +92,12 @@ async function getEODData(slackUserEmail) {
   });
 
   const completedIssues = completedResult.nodes;
-  const mergedIssues = mergedResult.nodes;
-  const inReviewIssuesRaw = inReviewResult.nodes;
 
-  // FIX: Deduplicate — an issue could move through multiple states in one day
-  //      (In Review → Merged → QA). Show it only once, in its highest state.
+  // FIX: Deduplicate — if an issue moved In Review → QA in the same day,
+  //      it would appear in both queries. Only show it once as "merged".
   const completedIds = new Set(completedIssues.map((i) => i.id));
-  const mergedIds = new Set(mergedIssues.map((i) => i.id));
-  const inReviewIssues = inReviewIssuesRaw.filter(
-    (i) => !completedIds.has(i.id) && !mergedIds.has(i.id)
+  const inReviewIssues = inReviewResult.nodes.filter(
+    (i) => !completedIds.has(i.id)
   );
 
   const inProgressIssues = inProgressResult.nodes;
@@ -129,7 +112,6 @@ async function getEODData(slackUserEmail) {
   return {
     linearUser,
     completedIssues,
-    mergedIssues,
     inReviewIssues,
     inProgressIssues,
     upcomingIssues,
@@ -140,7 +122,6 @@ function buildSlackBlocks(data, requesterName) {
   const {
     linearUser,
     completedIssues,
-    mergedIssues,
     inReviewIssues,
     inProgressIssues,
     upcomingIssues,
@@ -152,8 +133,8 @@ function buildSlackBlocks(data, requesterName) {
     day: "numeric",
   });
 
-  // Combine all "done" states into one section
-  const doneIssues = [...completedIssues, ...mergedIssues, ...inReviewIssues];
+  // Combine completed + in review into "Done Today"
+  const doneIssues = [...completedIssues, ...inReviewIssues];
 
   const blocks = [
     {
@@ -176,7 +157,7 @@ function buildSlackBlocks(data, requesterName) {
     { type: "divider" },
   ];
 
-  // ── Done today (completed + merged + in review) ──
+  // ── Done today (completed + in review) ──
   blocks.push({
     type: "section",
     text: {
@@ -192,14 +173,7 @@ function buildSlackBlocks(data, requesterName) {
     });
   } else {
     for (const issue of doneIssues) {
-      let tag;
-      if (completedIssues.includes(issue)) {
-        tag = " · _QA/Done_";
-      } else if (mergedIssues.includes(issue)) {
-        tag = " · _merged_";
-      } else {
-        tag = " · _PR open_";
-      }
+      const tag = completedIssues.includes(issue) ? " · _merged_" : " · _PR open_";
       blocks.push({
         type: "section",
         text: {
