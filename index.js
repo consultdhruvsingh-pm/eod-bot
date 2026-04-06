@@ -113,7 +113,6 @@ async function getEODData(slackUserEmail, userTimezone) {
     linear.issues({
       filter: {
         assignee: { id: { eq: linearUser.id } },
-        updatedAt: { gte: start, lte: end },
         completedAt: { null: true },
         canceledAt: { null: true },
         state: { type: { eq: "started" } },
@@ -207,18 +206,18 @@ function buildSlackBlocks(data, requesterName, userTimezone) {
 
   blocks.push({ type: "divider" });
 
-  // ── Active today (all started-type states) ──
+  // ── In progress (all started-type states, including carry-over) ──
   blocks.push({
     type: "section",
     text: {
       type: "mrkdwn",
-      text: `*🔄 Active Today* (${activeIssues.length})`,
+      text: `*🔄 In Progress* (${activeIssues.length})`,
     },
   });
   if (activeIssues.length === 0) {
     blocks.push({
       type: "section",
-      text: { type: "mrkdwn", text: "_Nothing in progress today_" },
+      text: { type: "mrkdwn", text: "_Nothing in progress_" },
     });
   } else {
     pushLineSections(blocks, activeIssues.map(issueLine));
