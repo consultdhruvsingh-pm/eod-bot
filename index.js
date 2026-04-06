@@ -102,36 +102,49 @@ async function getEODData(slackUserEmail, userTimezone) {
 
   const { start, end } = todayRange(userTimezone);
 
-  const [completedResult, activeResult, upcomingResult] = await Promise.all([
-    linear.issues({
-      filter: {
-        assignee: { id: { eq: linearUser.id } },
-        completedAt: { gte: start, lte: end },
-      },
-      first: 50,
-    }),
-    linear.issues({
-      filter: {
-        assignee: { id: { eq: linearUser.id } },
-        completedAt: { null: true },
-        canceledAt: { null: true },
-        state: { type: { eq: "started" } },
-      },
-      first: 50,
-    }),
-    linear.issues({
-      filter: {
-        assignee: { id: { eq: linearUser.id } },
-        state: { type: { in: ["unstarted", "backlog"] } },
-        canceledAt: { null: true },
-        completedAt: { null: true },
-      },
-      first: 50,
-    }),
-  ]);
+  const [completedResult, inReviewResult, activeResult, upcomingResult] =
+    await Promise.all([
+      linear.issues({
+        filter: {
+          assignee: { id: { eq: linearUser.id } },
+          completedAt: { gte: start, lte: end },
+        },
+        first: 50,
+      }),
+      linear.issues({
+        filter: {
+          assignee: { id: { eq: linearUser.id } },
+          completedAt: { null: true },
+          canceledAt: { null: true },
+          state: { name: { eq: "In Review" } },
+        },
+        first: 50,
+      }),
+      linear.issues({
+        filter: {
+          assignee: { id: { eq: linearUser.id } },
+          completedAt: { null: true },
+          canceledAt: { null: true },
+          state: { type: { eq: "started" }, name: { neq: "In Review" } },
+        },
+        first: 50,
+      }),
+      linear.issues({
+        filter: {
+          assignee: { id: { eq: linearUser.id } },
+          state: { type: { in: ["unstarted", "backlog"] } },
+          canceledAt: { null: true },
+          completedAt: { null: true },
+        },
+        first: 50,
+      }),
+    ]);
 
   const completedIssues = completedResult.nodes;
   const completedIds = new Set(completedIssues.map((i) => i.id));
+  const inReviewIssues = inReviewResult.nodes.filter(
+    (i) => !completedIds.has(i.id)
+  );
   const activeIssues = activeResult.nodes.filter(
     (i) => !completedIds.has(i.id)
   );
@@ -143,7 +156,13 @@ async function getEODData(slackUserEmail, userTimezone) {
     })
     .slice(0, 5);
 
-  return { linearUser, completedIssues, activeIssues, upcomingIssues };
+  return {
+    linearUser,
+    completedIssues,
+    inReviewIssues,
+    activeIssues,
+    upcomingIssues,
+  };
 }
 
 function issueLine(issue) {
@@ -167,7 +186,7 @@ function pushLineSections(blocks, lines) {
 }
 
 function buildSlackBlocks(data, requesterName, userTimezone) {
-  const { linearUser, completedIssues, activeIssues, upcomingIssues } = data;
+  const { linearUser, completedIssues, inReviewIssues, activeIssues, upcomingIssues } = data;
 
   const dateOpts = { weekday: "long", month: "long", day: "numeric" };
   if (userTimezone) dateOpts.timeZone = userTimezone;
@@ -187,21 +206,28 @@ function buildSlackBlocks(data, requesterName, userTimezone) {
     { type: "divider" },
   ];
 
-  // ── Done today ──
+  // ── Done today (completed/merged + in review/PR open) ──
+  const doneIssues = [
+    ...completedIssues.map((i) => ({ issue: i, tag: " · _merged_" })),
+    ...inReviewIssues.map((i) => ({ issue: i, tag: " · _PR open_" })),
+  ];
   blocks.push({
     type: "section",
     text: {
       type: "mrkdwn",
-      text: `*✅ Done Today* (${completedIssues.length})`,
+      text: `*✅ Done Today* (${doneIssues.length})`,
     },
   });
-  if (completedIssues.length === 0) {
+  if (doneIssues.length === 0) {
     blocks.push({
       type: "section",
       text: { type: "mrkdwn", text: "_No tickets completed today_" },
     });
   } else {
-    pushLineSections(blocks, completedIssues.map(issueLine));
+    pushLineSections(
+      blocks,
+      doneIssues.map(({ issue, tag }) => `${issueLine(issue)}${tag}`)
+    );
   }
 
   blocks.push({ type: "divider" });
