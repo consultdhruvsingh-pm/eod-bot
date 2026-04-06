@@ -11,18 +11,75 @@ const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function getLinearUserByEmail(linear, email) {
-  const users = await linear.users();
-  return users.nodes.find(
-    (m) => m.email?.toLowerCase() === email.toLowerCase()
-  );
+  const trimmed = email.trim();
+  if (!trimmed) return undefined;
+
+  const byFilter = await linear.users({
+    first: 5,
+    filter: { email: { eqIgnoreCase: trimmed } },
+  });
+  if (byFilter.nodes.length > 0) return byFilter.nodes[0];
+
+  const needle = trimmed.toLowerCase();
+  let page = await linear.users({ first: 250 });
+  for (;;) {
+    const match = page.nodes.find((m) => m.email?.toLowerCase() === needle);
+    if (match) return match;
+    if (!page.pageInfo.hasNextPage) return undefined;
+    page = await page.fetchNext();
+  }
 }
 
-function todayRange() {
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  const end = new Date();
-  end.setHours(23, 59, 59, 999);
-  return { start, end };
+/** First UTC instant where `timeZone` reads as `y-mo-d` (ISO date). */
+function utcMsStartOfLocalDay(timeZone, y, mo, d) {
+  const target = `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  let lo = Date.UTC(y, mo - 1, d) - 8 * 86400000;
+  let hi = Date.UTC(y, mo - 1, d) + 8 * 86400000;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const s = new Date(mid).toLocaleDateString("sv-SE", { timeZone });
+    if (s < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** First UTC instant on the next calendar day in `timeZone` after `startMs`. */
+function utcMsStartOfNextLocalDay(timeZone, startMs) {
+  const currentTarget = new Date(startMs).toLocaleDateString("sv-SE", { timeZone });
+  let lo = startMs;
+  let hi = startMs + 48 * 3600000;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const s = new Date(mid).toLocaleDateString("sv-SE", { timeZone });
+    if (s <= currentTarget) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function todayRange(tz) {
+  if (!tz) {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const end = new Date();
+    end.setHours(23, 59, 59, 999);
+    return { start, end };
+  }
+
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const y = +parts.find((p) => p.type === "year").value;
+  const mo = +parts.find((p) => p.type === "month").value;
+  const d = +parts.find((p) => p.type === "day").value;
+  const startMs = utcMsStartOfLocalDay(tz, y, mo, d);
+  const nextMs = utcMsStartOfNextLocalDay(tz, startMs);
+  return { start: new Date(startMs), end: new Date(nextMs - 1) };
 }
 
 function priorityLabel(p) {
@@ -33,7 +90,7 @@ function priorityEmoji(p) {
   return ["⚪", "🔴", "🟠", "🔵", "🟢"][p] ?? "⚪";
 }
 
-async function getEODData(slackUserEmail) {
+async function getEODData(slackUserEmail, userTimezone) {
   const linear = new LinearClient({ apiKey: LINEAR_API_KEY });
   const linearUser = await getLinearUserByEmail(linear, slackUserEmail);
 
@@ -43,64 +100,42 @@ async function getEODData(slackUserEmail) {
     };
   }
 
-  const { start, end } = todayRange();
+  const { start, end } = todayRange(userTimezone);
 
-  // ── Done today: QA or Done (completedAt set today) ──
-  const completedResult = await linear.issues({
-    filter: {
-      assignee: { id: { eq: linearUser.id } },
-      completedAt: { gte: start, lte: end },
-    },
-    first: 50,
-  });
-
-  // ── Done today: In Review (PR opened, awaiting merge) ──
-  // FIX: Added updatedAt filter so we only pick up issues that moved
-  //       to "In Review" TODAY, not all historical In Review issues.
-  const inReviewResult = await linear.issues({
-    filter: {
-      assignee: { id: { eq: linearUser.id } },
-      updatedAt: { gte: start, lte: end },
-      completedAt: { null: true },
-      canceledAt: { null: true },
-      state: { name: { eq: "In Review" } },
-    },
-    first: 50,
-  });
-
-  // ── Still in progress (coding not done yet) ──
-  const inProgressResult = await linear.issues({
-    filter: {
-      assignee: { id: { eq: linearUser.id } },
-      updatedAt: { gte: start, lte: end },
-      completedAt: { null: true },
-      canceledAt: { null: true },
-      state: { name: { eq: "In Progress" } },
-    },
-    first: 50,
-  });
-
-  // ── Top upcoming tasks by priority ──
-  const upcomingResult = await linear.issues({
-    filter: {
-      assignee: { id: { eq: linearUser.id } },
-      state: { type: { in: ["unstarted", "backlog"] } },
-      canceledAt: { null: true },
-      completedAt: { null: true },
-    },
-    first: 50,
-  });
+  const [completedResult, activeResult, upcomingResult] = await Promise.all([
+    linear.issues({
+      filter: {
+        assignee: { id: { eq: linearUser.id } },
+        completedAt: { gte: start, lte: end },
+      },
+      first: 50,
+    }),
+    linear.issues({
+      filter: {
+        assignee: { id: { eq: linearUser.id } },
+        updatedAt: { gte: start, lte: end },
+        completedAt: { null: true },
+        canceledAt: { null: true },
+        state: { type: { eq: "started" } },
+      },
+      first: 50,
+    }),
+    linear.issues({
+      filter: {
+        assignee: { id: { eq: linearUser.id } },
+        state: { type: { in: ["unstarted", "backlog"] } },
+        canceledAt: { null: true },
+        completedAt: { null: true },
+      },
+      first: 50,
+    }),
+  ]);
 
   const completedIssues = completedResult.nodes;
-
-  // FIX: Deduplicate — if an issue moved In Review → QA in the same day,
-  //      it would appear in both queries. Only show it once as "merged".
   const completedIds = new Set(completedIssues.map((i) => i.id));
-  const inReviewIssues = inReviewResult.nodes.filter(
+  const activeIssues = activeResult.nodes.filter(
     (i) => !completedIds.has(i.id)
   );
-
-  const inProgressIssues = inProgressResult.nodes;
   const upcomingIssues = upcomingResult.nodes
     .sort((a, b) => {
       const pa = a.priority === 0 ? 99 : a.priority;
@@ -109,142 +144,114 @@ async function getEODData(slackUserEmail) {
     })
     .slice(0, 5);
 
-  return {
-    linearUser,
-    completedIssues,
-    inReviewIssues,
-    inProgressIssues,
-    upcomingIssues,
-  };
+  return { linearUser, completedIssues, activeIssues, upcomingIssues };
 }
 
-function buildSlackBlocks(data, requesterName) {
-  const {
-    linearUser,
-    completedIssues,
-    inReviewIssues,
-    inProgressIssues,
-    upcomingIssues,
-  } = data;
+function issueLine(issue) {
+  return `${priorityEmoji(issue.priority)} *<${issue.url}|${issue.identifier}>* ${issue.title}`;
+}
 
-  const today = new Date().toLocaleDateString("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-  });
+/** Split lines into section blocks that stay under Slack's 3000-char mrkdwn limit. */
+function pushLineSections(blocks, lines) {
+  if (lines.length === 0) return;
+  let buf = "";
+  for (const line of lines) {
+    if (buf.length + line.length + 1 > 2900 && buf.length > 0) {
+      blocks.push({ type: "section", text: { type: "mrkdwn", text: buf } });
+      buf = "";
+    }
+    buf += (buf ? "\n" : "") + line;
+  }
+  if (buf) {
+    blocks.push({ type: "section", text: { type: "mrkdwn", text: buf } });
+  }
+}
 
-  // Combine completed + in review into "Done Today"
-  const doneIssues = [...completedIssues, ...inReviewIssues];
+function buildSlackBlocks(data, requesterName, userTimezone) {
+  const { linearUser, completedIssues, activeIssues, upcomingIssues } = data;
+
+  const dateOpts = { weekday: "long", month: "long", day: "numeric" };
+  if (userTimezone) dateOpts.timeZone = userTimezone;
+  const today = new Date().toLocaleDateString("en-US", dateOpts);
 
   const blocks = [
     {
       type: "header",
-      text: {
-        type: "plain_text",
-        text: `📋 EOD Report — ${today}`,
-        emoji: true,
-      },
+      text: { type: "plain_text", text: `📋 EOD Report — ${today}`, emoji: true },
     },
     {
       type: "context",
       elements: [
-        {
-          type: "mrkdwn",
-          text: `Requested by *${requesterName}* · Linear: *${linearUser.name}*`,
-        },
+        { type: "mrkdwn", text: `Requested by *${requesterName}* · Linear: *${linearUser.name}*` },
       ],
     },
     { type: "divider" },
   ];
 
-  // ── Done today (completed + in review) ──
+  // ── Done today ──
   blocks.push({
     type: "section",
     text: {
       type: "mrkdwn",
-      text: `*✅ Done Today* (${doneIssues.length})`,
+      text: `*✅ Done Today* (${completedIssues.length})`,
     },
   });
-
-  if (doneIssues.length === 0) {
+  if (completedIssues.length === 0) {
     blocks.push({
       type: "section",
       text: { type: "mrkdwn", text: "_No tickets completed today_" },
     });
   } else {
-    for (const issue of doneIssues) {
-      const tag = completedIssues.includes(issue) ? " · _merged_" : " · _PR open_";
-      blocks.push({
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `${priorityEmoji(issue.priority)} *<${issue.url}|${issue.identifier}>* ${issue.title}${tag}`,
-        },
-      });
-    }
+    pushLineSections(blocks, completedIssues.map(issueLine));
   }
 
   blocks.push({ type: "divider" });
 
-  // ── Still in progress ──
+  // ── Active today (all started-type states) ──
   blocks.push({
     type: "section",
     text: {
       type: "mrkdwn",
-      text: `*🔄 In Progress* (${inProgressIssues.length})`,
+      text: `*🔄 Active Today* (${activeIssues.length})`,
     },
   });
-
-  if (inProgressIssues.length === 0) {
+  if (activeIssues.length === 0) {
     blocks.push({
       type: "section",
-      text: { type: "mrkdwn", text: "_Nothing still in progress_" },
+      text: { type: "mrkdwn", text: "_Nothing in progress today_" },
     });
   } else {
-    for (const issue of inProgressIssues) {
-      blocks.push({
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `${priorityEmoji(issue.priority)} *<${issue.url}|${issue.identifier}>* ${issue.title}`,
-        },
-      });
-    }
+    pushLineSections(blocks, activeIssues.map(issueLine));
   }
 
   blocks.push({ type: "divider" });
 
   // ── Top 5 next tasks ──
+  const nextLines = upcomingIssues.map(
+    (issue, i) =>
+      `*${i + 1}.* ${priorityEmoji(issue.priority)} *<${issue.url}|${issue.identifier}>* ${issue.title}  _${priorityLabel(issue.priority)}_`
+  );
   blocks.push({
     type: "section",
-    text: { type: "mrkdwn", text: `*🎯 Top 5 Next Tasks (by priority)*` },
+    text: {
+      type: "mrkdwn",
+      text: `*🎯 Top 5 Next Tasks (by priority)*`,
+    },
   });
-
-  if (upcomingIssues.length === 0) {
+  if (nextLines.length === 0) {
     blocks.push({
       type: "section",
       text: { type: "mrkdwn", text: "_No upcoming tasks assigned_" },
     });
   } else {
-    upcomingIssues.forEach((issue, i) => {
-      blocks.push({
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `*${i + 1}.* ${priorityEmoji(issue.priority)} *<${issue.url}|${issue.identifier}>* ${issue.title}\n   _Priority: ${priorityLabel(issue.priority)}_`,
-        },
-      });
-    });
+    pushLineSections(blocks, nextLines);
   }
 
   blocks.push({ type: "divider" });
   blocks.push({
     type: "context",
     elements: [
-      {
-        type: "mrkdwn",
-        text: "💡 Reply to this message with your Loom + PR link, and any blockers not captured in Linear.",
-      },
+      { type: "mrkdwn", text: "💡 Reply to this message with your Loom + PR link, and any blockers not captured in Linear." },
     ],
   });
 
@@ -276,9 +283,10 @@ app.post("/eod", async (req, res) => {
       return;
     }
 
-    const email = slackData.user.profile.email;
+    const email = slackData.user.profile.email.trim();
     const displayName = slackData.user.profile.display_name || user_name;
-    const data = await getEODData(email);
+    const userTimezone = slackData.user.tz || null;
+    const data = await getEODData(email, userTimezone);
 
     if (data.error) {
       await postToResponseUrl(response_url, {
@@ -288,7 +296,7 @@ app.post("/eod", async (req, res) => {
       return;
     }
 
-    const blocks = buildSlackBlocks(data, displayName);
+    const blocks = buildSlackBlocks(data, displayName, userTimezone);
     await postToResponseUrl(response_url, {
       response_type: "in_channel",
       blocks,
