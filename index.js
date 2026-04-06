@@ -300,6 +300,18 @@ app.post("/eod", async (req, res) => {
       response_type: "in_channel",
       blocks,
     });
+
+    const eodChannel = process.env.EOD_CHANNEL;
+    if (eodChannel) {
+      await fetch("https://slack.com/api/chat.postMessage", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ channel: eodChannel, blocks }),
+      });
+    }
   } catch (err) {
     console.error("EOD bot error:", err);
     await postToResponseUrl(response_url, {
