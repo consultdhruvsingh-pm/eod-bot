@@ -102,7 +102,7 @@ async function getEODData(slackUserEmail, userTimezone) {
 
   const { start, end } = todayRange(userTimezone);
 
-  const [completedResult, inReviewResult, activeResult, upcomingResult] =
+  const [completedResult, inReviewResult, activeResult, upcomingResult, createdResult] =
     await Promise.all([
       linear.issues({
         filter: {
@@ -138,6 +138,13 @@ async function getEODData(slackUserEmail, userTimezone) {
         },
         first: 50,
       }),
+      linear.issues({
+        filter: {
+          creator: { id: { eq: linearUser.id } },
+          createdAt: { gte: start, lte: end },
+        },
+        first: 100,
+      }),
     ]);
 
   const completedIssues = completedResult.nodes;
@@ -155,6 +162,7 @@ async function getEODData(slackUserEmail, userTimezone) {
       return pa - pb;
     })
     .slice(0, 5);
+  const createdIssues = createdResult.nodes;
 
   return {
     linearUser,
@@ -162,6 +170,7 @@ async function getEODData(slackUserEmail, userTimezone) {
     inReviewIssues,
     activeIssues,
     upcomingIssues,
+    createdIssues,
   };
 }
 
@@ -185,8 +194,18 @@ function pushLineSections(blocks, lines) {
   }
 }
 
+function issuesCreatedSummary(issues) {
+  if (issues.length === 0) return "_No issues created today_";
+  const counts = [0, 1, 2, 3, 4].reduce((acc, p) => {
+    const n = issues.filter((i) => i.priority === p).length;
+    if (n > 0) acc.push(`${priorityLabel(p)} (${n})`);
+    return acc;
+  }, []);
+  return counts.join(" · ");
+}
+
 function buildSlackBlocks(data, requesterName, userTimezone) {
-  const { linearUser, completedIssues, inReviewIssues, activeIssues, upcomingIssues } = data;
+  const { linearUser, completedIssues, inReviewIssues, activeIssues, upcomingIssues, createdIssues } = data;
 
   const dateOpts = { weekday: "long", month: "long", day: "numeric" };
   if (userTimezone) dateOpts.timeZone = userTimezone;
@@ -271,6 +290,21 @@ function buildSlackBlocks(data, requesterName, userTimezone) {
   } else {
     pushLineSections(blocks, nextLines);
   }
+
+  blocks.push({ type: "divider" });
+
+  // ── Issues created today ──
+  blocks.push({
+    type: "section",
+    text: {
+      type: "mrkdwn",
+      text: `*📝 Issues Created Today* (${createdIssues.length})`,
+    },
+  });
+  blocks.push({
+    type: "section",
+    text: { type: "mrkdwn", text: issuesCreatedSummary(createdIssues) },
+  });
 
   blocks.push({ type: "divider" });
   blocks.push({
