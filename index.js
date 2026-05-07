@@ -194,15 +194,6 @@ function pushLineSections(blocks, lines) {
   }
 }
 
-function issuesCreatedSummary(issues) {
-  if (issues.length === 0) return "_No issues created today_";
-  const counts = [0, 1, 2, 3, 4].reduce((acc, p) => {
-    const n = issues.filter((i) => i.priority === p).length;
-    if (n > 0) acc.push(`${priorityLabel(p)} (${n})`);
-    return acc;
-  }, []);
-  return counts.join(" · ");
-}
 
 function buildSlackBlocks(data, requesterName, userTimezone) {
   const { linearUser, completedIssues, inReviewIssues, activeIssues, upcomingIssues, createdIssues } = data;
@@ -301,10 +292,14 @@ function buildSlackBlocks(data, requesterName, userTimezone) {
       text: `*📝 Issues Created Today* (${createdIssues.length})`,
     },
   });
-  blocks.push({
-    type: "section",
-    text: { type: "mrkdwn", text: issuesCreatedSummary(createdIssues) },
-  });
+  if (createdIssues.length === 0) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: "_No issues created today_" },
+    });
+  } else {
+    pushLineSections(blocks, createdIssues.map(issueLine));
+  }
 
   blocks.push({ type: "divider" });
   blocks.push({
