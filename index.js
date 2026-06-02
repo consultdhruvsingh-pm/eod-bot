@@ -30,56 +30,11 @@ async function getLinearUserByEmail(linear, email) {
   }
 }
 
-/** First UTC instant where `timeZone` reads as `y-mo-d` (ISO date). */
-function utcMsStartOfLocalDay(timeZone, y, mo, d) {
-  const target = `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-  let lo = Date.UTC(y, mo - 1, d) - 8 * 86400000;
-  let hi = Date.UTC(y, mo - 1, d) + 8 * 86400000;
-  while (lo < hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    const s = new Date(mid).toLocaleDateString("sv-SE", { timeZone });
-    if (s < target) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-
-/** First UTC instant on the next calendar day in `timeZone` after `startMs`. */
-function utcMsStartOfNextLocalDay(timeZone, startMs) {
-  const currentTarget = new Date(startMs).toLocaleDateString("sv-SE", { timeZone });
-  let lo = startMs;
-  let hi = startMs + 48 * 3600000;
-  while (lo < hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    const s = new Date(mid).toLocaleDateString("sv-SE", { timeZone });
-    if (s <= currentTarget) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-
-function todayRange(tz) {
-  if (!tz) {
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    const end = new Date();
-    end.setHours(23, 59, 59, 999);
-    return { start, end };
-  }
-
-  const now = new Date();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(now);
-  const y = +parts.find((p) => p.type === "year").value;
-  const mo = +parts.find((p) => p.type === "month").value;
-  const d = +parts.find((p) => p.type === "day").value;
-  const startMs = utcMsStartOfLocalDay(tz, y, mo, d);
-  const nextMs = utcMsStartOfNextLocalDay(tz, startMs);
-  return { start: new Date(startMs), end: new Date(nextMs - 1) };
+/** Cutoff for a rolling 24-hour window: the instant exactly 24h before now.
+ *  Timezone-independent — "last 24 hours" is the same length everywhere, so we
+ *  no longer need any local-calendar-day math. */
+function last24hCutoff() {
+  return new Date(Date.now() - 24 * 60 * 60 * 1000);
 }
 
 function priorityLabel(p) {
@@ -90,7 +45,7 @@ function priorityEmoji(p) {
   return ["⚪", "🔴", "🟠", "🔵", "🟢"][p] ?? "⚪";
 }
 
-async function getEODData(slackUserEmail, userTimezone) {
+async function getEODData(slackUserEmail) {
   const linear = new LinearClient({ apiKey: LINEAR_API_KEY });
   const linearUser = await getLinearUserByEmail(linear, slackUserEmail);
 
@@ -100,14 +55,14 @@ async function getEODData(slackUserEmail, userTimezone) {
     };
   }
 
-  const { start, end } = todayRange(userTimezone);
+  const since = last24hCutoff();
 
   const [completedResult, inReviewResult, activeResult, upcomingResult, createdResult] =
     await Promise.all([
       linear.issues({
         filter: {
           assignee: { id: { eq: linearUser.id } },
-          completedAt: { gte: start, lte: end },
+          completedAt: { gte: since },
         },
         first: 50,
       }),
@@ -141,7 +96,7 @@ async function getEODData(slackUserEmail, userTimezone) {
       linear.issues({
         filter: {
           creator: { id: { eq: linearUser.id } },
-          createdAt: { gte: start, lte: end },
+          createdAt: { gte: since },
         },
         first: 100,
       }),
@@ -216,7 +171,7 @@ function buildSlackBlocks(data, requesterName, userTimezone) {
     { type: "divider" },
   ];
 
-  // ── Done today (completed/merged + in review/PR open) ──
+  // ── Done (last 24h): completed/merged + in review/PR open ──
   const doneIssues = [
     ...completedIssues.map((i) => ({ issue: i, tag: " · _merged_" })),
     ...inReviewIssues.map((i) => ({ issue: i, tag: " · _PR open_" })),
@@ -225,13 +180,13 @@ function buildSlackBlocks(data, requesterName, userTimezone) {
     type: "section",
     text: {
       type: "mrkdwn",
-      text: `*✅ Done Today* (${doneIssues.length})`,
+      text: `*✅ Done (last 24h)* (${doneIssues.length})`,
     },
   });
   if (doneIssues.length === 0) {
     blocks.push({
       type: "section",
-      text: { type: "mrkdwn", text: "_No tickets completed today_" },
+      text: { type: "mrkdwn", text: "_No tickets completed in the last 24h_" },
     });
   } else {
     pushLineSections(
@@ -284,18 +239,18 @@ function buildSlackBlocks(data, requesterName, userTimezone) {
 
   blocks.push({ type: "divider" });
 
-  // ── Issues created today ──
+  // ── Issues created (last 24h) ──
   blocks.push({
     type: "section",
     text: {
       type: "mrkdwn",
-      text: `*📝 Issues Created Today* (${createdIssues.length})`,
+      text: `*📝 Issues Created (last 24h)* (${createdIssues.length})`,
     },
   });
   if (createdIssues.length === 0) {
     blocks.push({
       type: "section",
-      text: { type: "mrkdwn", text: "_No issues created today_" },
+      text: { type: "mrkdwn", text: "_No issues created in the last 24h_" },
     });
   } else {
     pushLineSections(blocks, createdIssues.map(issueLine));
@@ -340,7 +295,7 @@ app.post("/eod", async (req, res) => {
     const email = slackData.user.profile.email.trim();
     const displayName = slackData.user.profile.display_name || user_name;
     const userTimezone = slackData.user.tz || null;
-    const data = await getEODData(email, userTimezone);
+    const data = await getEODData(email);
 
     if (data.error) {
       await postToResponseUrl(response_url, {

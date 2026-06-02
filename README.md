@@ -1,8 +1,9 @@
 # EOD Bot — Setup Guide
 
 A Slack slash command bot that auto-generates EOD reports from Linear. Type `/eod` and instantly see:
-- ✅ Tasks completed today
-- 🔄 Tickets moved/in-progress today  
+- ✅ Tasks completed in the last 24h
+- 📝 Tickets you created in the last 24h
+- 🔄 Tickets in progress
 - 🎯 Top 5 upcoming tasks by priority
 
 ---
@@ -122,5 +123,5 @@ npm run dev
 When you type `/eod`, Slack sends a POST to your server. The bot:
 1. Gets your Slack email via the Slack API
 2. Finds your matching Linear user by email
-3. Queries Linear for issues completed today, moved today, and your top 5 upcoming
+3. Queries Linear for issues completed or created in the last 24h, what's in progress, and your top 5 upcoming
 4. Formats everything into a Slack Block Kit message posted to the channel
