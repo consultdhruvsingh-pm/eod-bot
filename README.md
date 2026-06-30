@@ -6,6 +6,9 @@ A Slack slash command bot that auto-generates EOD reports from Linear. Type `/eo
 - 🔄 Tickets in progress
 - 🎯 Top 5 upcoming tasks by priority
 
+> Built by a product manager with AI as the pair-programmer. Runs in production on Render.
+> Stack: Node.js · Slack Block Kit · Linear SDK · Render.
+
 ---
 
 ## Step 1: Get your Linear API Key
@@ -38,13 +41,9 @@ A Slack slash command bot that auto-generates EOD reports from Linear. Type `/eo
 
 ---
 
-## Step 3: Deploy to Railway (free, 2 minutes)
+## Step 3: Deploy to Render
 
-Railway is a simple hosting platform. Free tier is plenty for this bot.
-
-1. Go to **https://railway.app** → Sign up with GitHub
-2. Click **"New Project"** → **"Deploy from GitHub repo"**
-3. Push this code to a GitHub repo first:
+1. Push this code to a GitHub repo first:
    ```bash
    git init
    git add .
@@ -53,15 +52,19 @@ Railway is a simple hosting platform. Free tier is plenty for this bot.
    git remote add origin https://github.com/YOUR_USERNAME/eod-bot.git
    git push -u origin main
    ```
-4. In Railway, select your new repo → it will auto-deploy
-5. Go to your project → **"Variables"** tab → Add these:
+2. Go to **https://render.com** → Sign up with GitHub
+3. Click **"New +"** → **"Web Service"** → connect your GitHub repo
+4. Configure the service:
+   - **Build Command:** `npm install`
+   - **Start Command:** `npm start`
+5. Scroll to **"Environment Variables"** → Add these:
    ```
    LINEAR_API_KEY     = lin_api_your_key_here
    SLACK_BOT_TOKEN    = xoxb-your-token-here
    LINEAR_TEAM_NAME   = Engineering
    ```
-6. Go to **"Settings"** → **"Domains"** → Click **"Generate Domain"**
-7. Copy your Railway URL, e.g. `https://eod-bot-production.up.railway.app`
+6. Click **"Create Web Service"** — Render builds and deploys automatically
+7. Copy your Render URL, e.g. `https://eod-bot.onrender.com`
 
 ---
 
@@ -71,7 +74,7 @@ Railway is a simple hosting platform. Free tier is plenty for this bot.
 2. Left sidebar → **"Slash Commands"** → **"Create New Command"**
 3. Fill in:
    - **Command:** `/eod`
-   - **Request URL:** `https://YOUR-RAILWAY-URL.up.railway.app/eod`
+   - **Request URL:** `https://YOUR-RENDER-URL.onrender.com/eod`
    - **Short Description:** `Generate your EOD report from Linear`
    - **Usage Hint:** _(leave blank)_
 4. Click **"Save"**
@@ -87,16 +90,16 @@ Go to any Slack channel and type `/eod` — you should see your EOD report appea
 
 ## Troubleshooting
 
-**"No Linear account found for..."**  
+**"No Linear account found for..."**
 → Your Slack email and Linear email must match. Check Linear at linear.app/settings/account.
 
-**"Couldn't retrieve your Slack email"**  
+**"Couldn't retrieve your Slack email"**
 → Make sure you added the `users:read.email` scope and reinstalled the app.
 
-**Bot doesn't respond**  
-→ Check Railway logs (click your deployment → "View Logs") for errors.
+**Bot doesn't respond**
+→ Check your Render logs (open your service → "Logs") for errors.
 
-**Empty completed/in-progress lists**  
+**Empty completed/in-progress lists**
 → Make sure you're assigned to tickets in Linear and they were updated today.
 
 ---
