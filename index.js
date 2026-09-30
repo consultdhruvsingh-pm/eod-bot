@@ -37,6 +37,17 @@ function last24hCutoff() {
   return new Date(Date.now() - 24 * 60 * 60 * 1000);
 }
 
+/** When the issue last changed workflow state. The issue is currently in
+ *  "In Review", so its most recent state transition is the move into review. */
+async function lastStateChangeAt(issue) {
+  const history = await issue.history({ first: 100 });
+  let latest = null;
+  for (const h of history.nodes) {
+    if (h.toStateId && (!latest || h.createdAt > latest)) latest = h.createdAt;
+  }
+  return latest;
+}
+
 function priorityLabel(p) {
   return ["No priority", "Urgent", "High", "Normal", "Low"][p] ?? "Unknown";
 }
@@ -104,8 +115,23 @@ async function getEODData(slackUserEmail) {
 
   const completedIssues = completedResult.nodes;
   const completedIds = new Set(completedIssues.map((i) => i.id));
-  const inReviewIssues = inReviewResult.nodes.filter(
+  // Only tickets that *moved into* In Review in the last 24h count as done
+  // today. Anything that's been sitting in review longer is carry-over, not
+  // today's work. updatedAt >= since is a cheap pre-filter (a state change
+  // bumps updatedAt) before checking history.
+  const openInReview = inReviewResult.nodes.filter(
     (i) => !completedIds.has(i.id)
+  );
+  const movedAt = await Promise.all(
+    openInReview.map((i) =>
+      i.updatedAt >= since ? lastStateChangeAt(i) : Promise.resolve(null)
+    )
+  );
+  const inReviewIssues = openInReview.filter(
+    (_, idx) => movedAt[idx] && movedAt[idx] >= since
+  );
+  const staleInReviewIssues = openInReview.filter(
+    (_, idx) => !(movedAt[idx] && movedAt[idx] >= since)
   );
   const activeIssues = activeResult.nodes.filter(
     (i) => !completedIds.has(i.id)
@@ -123,6 +149,7 @@ async function getEODData(slackUserEmail) {
     linearUser,
     completedIssues,
     inReviewIssues,
+    staleInReviewIssues,
     activeIssues,
     upcomingIssues,
     createdIssues,
@@ -151,7 +178,7 @@ function pushLineSections(blocks, lines) {
 
 
 function buildSlackBlocks(data, requesterName, userTimezone) {
-  const { linearUser, completedIssues, inReviewIssues, activeIssues, upcomingIssues, createdIssues } = data;
+  const { linearUser, completedIssues, inReviewIssues, staleInReviewIssues, activeIssues, upcomingIssues, createdIssues } = data;
 
   const dateOpts = { weekday: "long", month: "long", day: "numeric" };
   if (userTimezone) dateOpts.timeZone = userTimezone;
@@ -215,6 +242,23 @@ function buildSlackBlocks(data, requesterName, userTimezone) {
   }
 
   blocks.push({ type: "divider" });
+
+  // ── Still in review (moved to In Review >24h ago) — carry-over, not done today ──
+  if (staleInReviewIssues.length > 0) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*👀 Still In Review (>24h)* (${staleInReviewIssues.length})`,
+      },
+    });
+    const shown = staleInReviewIssues.slice(0, 10).map(issueLine);
+    if (staleInReviewIssues.length > shown.length) {
+      shown.push(`_…and ${staleInReviewIssues.length - shown.length} more_`);
+    }
+    pushLineSections(blocks, shown);
+    blocks.push({ type: "divider" });
+  }
 
   // ── Top 5 next tasks ──
   const nextLines = upcomingIssues.map(
