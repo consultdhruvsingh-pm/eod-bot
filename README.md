@@ -88,6 +88,36 @@ Go to any Slack channel and type `/eod` — you should see your EOD report appea
 
 ---
 
+## Morning plan (scheduled)
+
+`morning.js` posts one message each weekday morning with every listed developer's
+in-progress Linear tickets and their next 3 tasks. It flags anyone with nothing in
+progress, nothing in Todo, or more than 3 tickets in progress, and marks in-progress
+tickets with no update in 2 working days. It runs as a separate Render Cron Job, so
+the `/eod` web service is unaffected.
+
+"Next" comes only from **Todo**, highest priority first, then the oldest ticket.
+Backlog and **In Review** tickets are left out.
+
+1. Invite the bot to the channel (`/invite @EOD Bot`). Private channels need this.
+2. In Render: **New +** → **Cron Job** → connect this repo, branch `main`.
+   - **Build Command:** `npm install`
+   - **Command:** `npm run morning`
+   - **Schedule:** `30 4 * * 1-5` (Render uses UTC; this is 10:00 IST, Mon–Fri)
+3. Add environment variables (or attach an environment group shared with the web service):
+   ```
+   LINEAR_API_KEY   = same as the web service
+   SLACK_BOT_TOKEN  = same as the web service
+   MORNING_CHANNEL  = channel ID, e.g. C0123456789
+   MORNING_DEVS     = comma-separated emails, the same in Slack and Linear
+   ```
+4. To check it without posting, add `DRY_RUN=1`, click **Trigger Run** on the Runs
+   page, and read the logs. Remove `DRY_RUN` when it looks right.
+
+Render bills a Cron Job by run time, with a $1/month minimum.
+
+---
+
 ## Troubleshooting
 
 **"No Linear account found for..."**
