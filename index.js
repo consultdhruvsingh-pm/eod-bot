@@ -1,34 +1,13 @@
 const express = require("express");
-const { LinearClient } = require("@linear/sdk");
+const { getConnieMemberByEmail, searchTasks, readTasksInFull } = require("./connie");
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-const LINEAR_API_KEY = process.env.LINEAR_API_KEY;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-async function getLinearUserByEmail(linear, email) {
-  const trimmed = email.trim();
-  if (!trimmed) return undefined;
-
-  const byFilter = await linear.users({
-    first: 5,
-    filter: { email: { eqIgnoreCase: trimmed } },
-  });
-  if (byFilter.nodes.length > 0) return byFilter.nodes[0];
-
-  const needle = trimmed.toLowerCase();
-  let page = await linear.users({ first: 250 });
-  for (;;) {
-    const match = page.nodes.find((m) => m.email?.toLowerCase() === needle);
-    if (match) return match;
-    if (!page.pageInfo.hasNextPage) return undefined;
-    page = await page.fetchNext();
-  }
-}
 
 /** Cutoff for a rolling 24-hour window: the instant exactly 24h before now.
  *  Timezone-independent — "last 24 hours" is the same length everywhere, so we
@@ -37,15 +16,22 @@ function last24hCutoff() {
   return new Date(Date.now() - 24 * 60 * 60 * 1000);
 }
 
-/** When the issue last changed workflow state. The issue is currently in
- *  "In Review", so its most recent state transition is the move into review. */
-async function lastStateChangeAt(issue) {
-  const history = await issue.history({ first: 100 });
-  let latest = null;
-  for (const h of history.nodes) {
-    if (h.toStateId && (!latest || h.createdAt > latest)) latest = h.createdAt;
-  }
-  return latest;
+/** True when an ISO timestamp is at or after the cutoff. */
+function since24h(value, since) {
+  return Boolean(value) && new Date(value) >= since;
+}
+
+/** When the task moved into In review. Connie stamps review_requested_at on
+ *  that move, but the Tool API does not return it yet; until it does, the last
+ *  update stands in (a move into review is an update, so nothing moved in the
+ *  last 24h is missed, but an edit to a task already in review also counts). */
+function movedIntoReviewAt(task) {
+  return task.reviewRequestedAt || task.updatedAt;
+}
+
+/** When the task was completed. Same stand-in as above until completedAt is returned. */
+function completedAt(task) {
+  return task.completedAt || task.updatedAt;
 }
 
 function priorityLabel(p) {
@@ -56,97 +42,55 @@ function priorityEmoji(p) {
   return ["⚪", "🔴", "🟠", "🔵", "🟢"][p] ?? "⚪";
 }
 
-async function getEODData(slackUserEmail) {
-  const linear = new LinearClient({ apiKey: LINEAR_API_KEY });
-  const linearUser = await getLinearUserByEmail(linear, slackUserEmail);
+/** Tasks this member created in the last 24h. The task list has no creation
+ *  time, so recently updated candidates are read in full for theirs (a task
+ *  created in the last 24h was also updated in it). */
+async function createdSince(member, since) {
+  const candidates = await searchTasks({ createdBy: member.name }, { updatedSince: since });
+  if (candidates.length === 0) return [];
+  const full = await readTasksInFull(candidates.map((t) => t.identifier));
+  return candidates.filter((t) => since24h(full.get(t.identifier)?.createdAt ?? t.createdAt, since));
+}
 
-  if (!linearUser) {
+async function getEODData(slackUserEmail) {
+  const connieUser = await getConnieMemberByEmail(slackUserEmail);
+
+  if (!connieUser) {
     return {
-      error: `No Linear account found for *${slackUserEmail}*. Make sure your Slack and Linear emails match.`,
+      error: `No Connie member found for *${slackUserEmail}*. Make sure your Slack and Connie emails match.`,
     };
   }
 
   const since = last24hCutoff();
+  const assignee = connieUser.email;
 
-  const [completedResult, inReviewResult, activeResult, upcomingResult, createdResult] =
+  const [doneTasks, openInReview, activeTasks, upcomingTasks, createdTasks] =
     await Promise.all([
-      linear.issues({
-        filter: {
-          assignee: { id: { eq: linearUser.id } },
-          completedAt: { gte: since },
-        },
-        first: 50,
-      }),
-      linear.issues({
-        filter: {
-          assignee: { id: { eq: linearUser.id } },
-          completedAt: { null: true },
-          canceledAt: { null: true },
-          state: { name: { eq: "In Review" } },
-        },
-        first: 50,
-      }),
-      linear.issues({
-        filter: {
-          assignee: { id: { eq: linearUser.id } },
-          completedAt: { null: true },
-          canceledAt: { null: true },
-          state: { type: { eq: "started" }, name: { neq: "In Review" } },
-        },
-        first: 50,
-      }),
-      linear.issues({
-        filter: {
-          assignee: { id: { eq: linearUser.id } },
-          state: { type: { in: ["unstarted", "backlog"] } },
-          canceledAt: { null: true },
-          completedAt: { null: true },
-        },
-        first: 50,
-      }),
-      linear.issues({
-        filter: {
-          creator: { id: { eq: linearUser.id } },
-          createdAt: { gte: since },
-        },
-        first: 100,
-      }),
+      searchTasks({ assignee, status: ["done"] }, { updatedSince: since }),
+      searchTasks({ assignee, status: ["in_review"] }),
+      searchTasks({ assignee, status: ["in_progress"] }),
+      searchTasks({ assignee, status: ["todo", "backlog"] }),
+      createdSince(connieUser, since),
     ]);
 
-  const completedIssues = completedResult.nodes;
-  const completedIds = new Set(completedIssues.map((i) => i.id));
-  // Only tickets that *moved into* In Review in the last 24h count as done
+  const completedIssues = doneTasks.filter((t) => since24h(completedAt(t), since));
+  // Only tickets that *moved into* In review in the last 24h count as done
   // today. Anything that's been sitting in review longer is carry-over, not
-  // today's work. updatedAt >= since is a cheap pre-filter (a state change
-  // bumps updatedAt) before checking history.
-  const openInReview = inReviewResult.nodes.filter(
-    (i) => !completedIds.has(i.id)
-  );
-  const movedAt = await Promise.all(
-    openInReview.map((i) =>
-      i.updatedAt >= since ? lastStateChangeAt(i) : Promise.resolve(null)
-    )
-  );
-  const inReviewIssues = openInReview.filter(
-    (_, idx) => movedAt[idx] && movedAt[idx] >= since
-  );
-  const staleInReviewIssues = openInReview.filter(
-    (_, idx) => !(movedAt[idx] && movedAt[idx] >= since)
-  );
-  const activeIssues = activeResult.nodes.filter(
-    (i) => !completedIds.has(i.id)
-  );
-  const upcomingIssues = upcomingResult.nodes
+  // today's work.
+  const inReviewIssues = openInReview.filter((t) => since24h(movedIntoReviewAt(t), since));
+  const staleInReviewIssues = openInReview.filter((t) => !since24h(movedIntoReviewAt(t), since));
+  const activeIssues = activeTasks;
+  const upcomingIssues = upcomingTasks
     .sort((a, b) => {
       const pa = a.priority === 0 ? 99 : a.priority;
       const pb = b.priority === 0 ? 99 : b.priority;
       return pa - pb;
     })
     .slice(0, 5);
-  const createdIssues = createdResult.nodes;
+  const createdIssues = createdTasks;
 
   return {
-    linearUser,
+    connieUser,
     completedIssues,
     inReviewIssues,
     staleInReviewIssues,
@@ -178,7 +122,7 @@ function pushLineSections(blocks, lines) {
 
 
 function buildSlackBlocks(data, requesterName, userTimezone) {
-  const { linearUser, completedIssues, inReviewIssues, staleInReviewIssues, activeIssues, upcomingIssues, createdIssues } = data;
+  const { connieUser, completedIssues, inReviewIssues, staleInReviewIssues, activeIssues, upcomingIssues, createdIssues } = data;
 
   const dateOpts = { weekday: "long", month: "long", day: "numeric" };
   if (userTimezone) dateOpts.timeZone = userTimezone;
@@ -192,7 +136,7 @@ function buildSlackBlocks(data, requesterName, userTimezone) {
     {
       type: "context",
       elements: [
-        { type: "mrkdwn", text: `Requested by *${requesterName}* · Linear: *${linearUser.name}*` },
+        { type: "mrkdwn", text: `Requested by *${requesterName}* · Connie: *${connieUser.name}*` },
       ],
     },
     { type: "divider" },
@@ -304,7 +248,7 @@ function buildSlackBlocks(data, requesterName, userTimezone) {
   blocks.push({
     type: "context",
     elements: [
-      { type: "mrkdwn", text: "💡 Reply to this message with your Loom + PR link, and any blockers not captured in Linear." },
+      { type: "mrkdwn", text: "💡 Reply to this message with your Loom + PR link, and any blockers not captured in Connie." },
     ],
   });
 
