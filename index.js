@@ -42,11 +42,13 @@ function priorityEmoji(p) {
   return ["⚪", "🔴", "🟠", "🔵", "🟢"][p] ?? "⚪";
 }
 
-/** Tasks this member created in the last 24h. The task list has no creation
- *  time, so recently updated candidates are read in full for theirs (a task
- *  created in the last 24h was also updated in it). */
+/** Tasks this member created in the last 24h. Filtered by member ID, which
+ *  Connie matches exactly (a display name can match several members). The
+ *  task list may not carry a creation time yet, so recently updated candidates
+ *  are read in full for theirs (a task created in the last 24h was also
+ *  updated in it). */
 async function createdSince(member, since) {
-  const candidates = await searchTasks({ createdBy: member.name }, { updatedSince: since });
+  const candidates = await searchTasks({ createdBy: member.id }, { updatedSince: since });
   if (candidates.length === 0) return [];
   const full = await readTasksInFull(candidates.map((t) => t.identifier));
   return candidates.filter((t) => since24h(full.get(t.identifier)?.createdAt ?? t.createdAt, since));
