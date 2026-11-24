@@ -12,6 +12,8 @@ const MORNING_CHANNEL = process.env.MORNING_CHANNEL;
 const MORNING_DEVS = process.env.MORNING_DEVS || "";
 // DRY_RUN=1 prints the post instead of sending it.
 const DRY_RUN = process.env.DRY_RUN === "1";
+// Off by default. Set MORNING_ENABLED=1 to post the morning plan again.
+const MORNING_ENABLED = process.env.MORNING_ENABLED === "1";
 
 const TIMEZONE = "Asia/Kolkata";
 const NEXT_UP_COUNT = 3;
@@ -291,6 +293,11 @@ function blocksToText(blocks) {
 // ─── Run ──────────────────────────────────────────────────────────────────────
 
 async function main() {
+  if (!MORNING_ENABLED && !DRY_RUN) {
+    console.log("Morning plan is disabled (set MORNING_ENABLED=1 to turn it on). Not posting.");
+    return;
+  }
+
   const emails = MORNING_DEVS.split(",").map((e) => e.trim()).filter(Boolean);
   if (emails.length === 0) throw new Error("MORNING_DEVS is empty");
   if (!DRY_RUN && !MORNING_CHANNEL) throw new Error("MORNING_CHANNEL is not set");

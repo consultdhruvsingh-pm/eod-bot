@@ -90,6 +90,9 @@ Go to any Slack channel and type `/eod` — you should see your EOD report appea
 
 ## Morning plan (scheduled)
 
+> **Disabled.** `morning.js` exits without posting unless `MORNING_ENABLED=1` is set
+> on the Cron Job. `DRY_RUN=1` still prints the message to the logs.
+
 `morning.js` posts one message each weekday morning with every listed developer's
 in-progress Linear tickets and their next 3 tasks. It flags anyone with nothing in
 progress, nothing in Todo, or more than 3 tickets in progress, and marks in-progress
