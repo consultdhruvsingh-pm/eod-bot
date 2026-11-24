@@ -1,13 +1,12 @@
 // Morning plan: posts each developer's in-progress work and next tasks from
-// Linear to a Slack channel. Runs as a Render Cron Job on weekday mornings and
-// exits when done, so it does not touch the /eod web service in index.js.
+// Connie Tasks to a Slack channel. Runs as a Render Cron Job on weekday mornings
+// and exits when done, so it does not touch the /eod web service in index.js.
 
-const { LinearClient } = require("@linear/sdk");
+const { getConnieMemberByEmail, searchTasks } = require("./connie");
 
-const LINEAR_API_KEY = process.env.LINEAR_API_KEY;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const MORNING_CHANNEL = process.env.MORNING_CHANNEL;
-// Comma-separated work emails, the same in Slack and Linear. Kept in the
+// Comma-separated work emails, the same in Slack and Connie. Kept in the
 // environment rather than the repo because the repo is public.
 const MORNING_DEVS = process.env.MORNING_DEVS || "";
 // DRY_RUN=1 prints the post instead of sending it.
@@ -22,66 +21,20 @@ const IN_PROGRESS_LIMIT = 3;
 const STALE_AFTER_WORKING_DAYS = 2;
 const TITLE_MAX_CHARS = 100;
 
-// ─── Linear ───────────────────────────────────────────────────────────────────
+// ─── Connie ───────────────────────────────────────────────────────────────────
 
-async function getLinearUserByEmail(linear, email) {
-  const trimmed = email.trim();
-  if (!trimmed) return undefined;
+// Connie statuses in the shape the plan logic reads (Linear's state type/name):
+// In progress is the started work, To do is what comes next. In review,
+// Backlog, Triage and closed tasks are left out, as before.
+const STATE_OF = {
+  in_progress: { type: "started", name: "In Progress" },
+  todo: { type: "unstarted", name: "Todo" },
+};
 
-  const byFilter = await linear.users({
-    first: 5,
-    filter: { email: { eqIgnoreCase: trimmed } },
-  });
-  if (byFilter.nodes.length > 0) return byFilter.nodes[0];
-
-  const needle = trimmed.toLowerCase();
-  let page = await linear.users({ first: 250 });
-  for (;;) {
-    const match = page.nodes.find((m) => m.email?.toLowerCase() === needle);
-    if (match) return match;
-    if (!page.pageInfo.hasNextPage) return undefined;
-    page = await page.fetchNext();
-  }
-}
-
-// One raw query for everyone's open issues. The SDK's model objects would load
-// each issue's state and assignee with a separate request.
-const OPEN_ISSUES_QUERY = `
-  query MorningOpenIssues($assigneeIds: [ID!], $after: String) {
-    issues(
-      first: 100
-      after: $after
-      filter: {
-        assignee: { id: { in: $assigneeIds } }
-        state: { type: { in: ["started", "unstarted"] }, name: { neq: "In Review" } }
-      }
-    ) {
-      nodes {
-        identifier
-        title
-        url
-        priority
-        dueDate
-        createdAt
-        updatedAt
-        assignee { id }
-        state { name type }
-      }
-      pageInfo { hasNextPage endCursor }
-    }
-  }
-`;
-
-async function getOpenIssues(linear, assigneeIds) {
-  const issues = [];
-  let after = null;
-  for (;;) {
-    const res = await linear.client.rawRequest(OPEN_ISSUES_QUERY, { assigneeIds, after });
-    const page = res.data.issues;
-    issues.push(...page.nodes);
-    if (!page.pageInfo.hasNextPage) return issues;
-    after = page.pageInfo.endCursor;
-  }
+/** One developer's open tasks (In progress and To do), with their member id as assignee. */
+async function getOpenIssues(member) {
+  const tasks = await searchTasks({ assignee: member.email, status: ["in_progress", "todo"] });
+  return tasks.map((t) => ({ ...t, assignee: { id: member.id }, state: STATE_OF[t.status] }));
 }
 
 // ─── Slack ────────────────────────────────────────────────────────────────────
@@ -122,10 +75,12 @@ function priorityEmoji(p) {
   return ["⚪", "🔴", "🟠", "🔵", "🟢"][p] ?? "⚪";
 }
 
-/** Highest priority first, then the oldest ticket. */
+/** Highest priority first, then the oldest ticket. Connie's task list has no
+ *  creation time, so the task number (assigned in creation order) breaks ties. */
 function compareNext(a, b) {
   if (a.priority !== b.priority) return priorityRank(a.priority) - priorityRank(b.priority);
-  return a.createdAt < b.createdAt ? -1 : 1;
+  if (a.createdAt && b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
+  return (a.number ?? 0) - (b.number ?? 0);
 }
 
 /** The instant n working days (Mon–Fri) before `date`. */
@@ -168,7 +123,7 @@ function formatDay(value) {
   });
 }
 
-/** Linear due dates are plain YYYY-MM-DD dates with no time or zone. */
+/** Due dates are plain YYYY-MM-DD dates with no time or zone. */
 function formatDueDate(dueDate) {
   return new Date(`${dueDate}T00:00:00Z`).toLocaleDateString("en-US", {
     month: "short",
@@ -212,7 +167,7 @@ function devLines(dev, now) {
   const who = dev.slackUserId ? `<@${dev.slackUserId}>` : escapeMrkdwn(dev.name);
 
   if (!dev.summary) {
-    return [`*${who}* · ⚠️ No Linear account found for ${dev.email}`];
+    return [`*${who}* · ⚠️ No Connie member found for ${dev.email}`];
   }
 
   const { inProgress, nextUp, staleBefore, flags } = dev.summary;
@@ -266,7 +221,7 @@ function buildBlocks(devs, now) {
       elements: [
         {
           type: "mrkdwn",
-          text: `From Linear: what each developer has in progress and their next ${NEXT_UP_COUNT} tasks. Reply in this thread if your plan for today is different.`,
+          text: `From Connie: what each developer has in progress and their next ${NEXT_UP_COUNT} tasks. Reply in this thread if your plan for today is different.`,
         },
       ],
     },
@@ -303,25 +258,24 @@ async function main() {
   if (!DRY_RUN && !MORNING_CHANNEL) throw new Error("MORNING_CHANNEL is not set");
 
   const now = new Date();
-  const linear = new LinearClient({ apiKey: LINEAR_API_KEY });
 
   const devs = await Promise.all(
     emails.map(async (email) => {
-      const [linearUser, slackUserId] = await Promise.all([
-        getLinearUserByEmail(linear, email),
+      const [connieUser, slackUserId] = await Promise.all([
+        getConnieMemberByEmail(email),
         getSlackUserIdByEmail(email),
       ]);
-      if (!linearUser) console.warn(`No Linear account for ${email}`);
+      if (!connieUser) console.warn(`No Connie member for ${email}`);
       if (!slackUserId) console.warn(`No Slack account for ${email}`);
-      return { email, linearUser, slackUserId, name: linearUser?.name ?? email };
+      return { email, connieUser, slackUserId, name: connieUser?.name ?? email };
     })
   );
 
-  const found = devs.filter((d) => d.linearUser);
-  const issues = await getOpenIssues(linear, found.map((d) => d.linearUser.id));
+  const found = devs.filter((d) => d.connieUser);
+  const issues = (await Promise.all(found.map((d) => getOpenIssues(d.connieUser)))).flat();
   for (const dev of found) {
     dev.summary = summarizeDev(
-      issues.filter((i) => i.assignee?.id === dev.linearUser.id),
+      issues.filter((i) => i.assignee?.id === dev.connieUser.id),
       now
     );
   }
